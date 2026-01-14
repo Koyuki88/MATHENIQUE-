@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import axios from 'axios';
+import api from "@/api/axios";
 import { Navigation } from '@/components/layout/Navigation';
 
 interface LeaderboardEntry {
@@ -31,7 +31,6 @@ export default function Leaderboard() {
   const [page, setPage] = useState(0);
 
   const itemsPerPage = 10;
-  const token = localStorage.getItem('access_token');
 
   useEffect(() => {
     fetchLeaderboardData();
@@ -42,17 +41,10 @@ export default function Leaderboard() {
       setLoading(true);
       setError(null);
 
-      const headers = token ? { Authorization: `Bearer ${token}` } : {};
-
       const [globalRes, topRes, rankRes] = await Promise.all([
-        axios.get(
-          `${import.meta.env.VITE_API_URL}/leaderboard/global?skip=${page * itemsPerPage}&limit=${itemsPerPage}`,
-          { headers }
-        ),
-        axios.get(`${import.meta.env.VITE_API_URL}/leaderboard/top-10`, { headers }),
-        token
-          ? axios.get(`${import.meta.env.VITE_API_URL}/leaderboard/my-rank`, { headers })
-          : Promise.resolve({ data: null })
+        api.get(`/leaderboard/global?skip=${page * itemsPerPage}&limit=${itemsPerPage}`),
+        api.get("/leaderboard/top-10"),
+        api.get("/leaderboard/my-rank").catch(() => ({ data: null }))
       ]);
 
       setGlobalLeaderboard(globalRes.data);
