@@ -17,6 +17,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://mathenique-1.onrender.com",
         "https://mathenique-frontend.onrender.com",
         "https://mathenique-frontend-w2uu.onrender.com",
         "http://localhost:8080",
