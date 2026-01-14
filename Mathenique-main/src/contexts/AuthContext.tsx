@@ -49,13 +49,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     params.append("username", email);
     params.append("password", password);
 
-    const res = await api.post("/login", params);
-    localStorage.setItem("mathquest_token", res.data.access_token);
+    try {
+      const res = await api.post("/login", params);
+      localStorage.setItem("mathquest_token", res.data.access_token);
 
-    const me = await api.get("/me");
-    setUser(me.data);
+      const me = await api.get("/me");
+      setUser(me.data);
 
-    return true;
+      return true;
+    } catch (error) {
+      console.error("Login failed:", error);
+      return false;
+    }
   };
 
 
