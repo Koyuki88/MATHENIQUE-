@@ -232,11 +232,19 @@ export default function Play() {
     // Update Leaderboard
     try {
       if (scoreRef.current > 0) {
+        // Calculate rough accuracy based on final score
+        // Normal question = 10 pts.
+        const estimatedCorrect = Math.ceil(scoreRef.current / 10);
+        const accuracy = (estimatedCorrect / questions.length) * 100;
+        
         await api.post("/leaderboard/add-score", null, {
           params: {
             points: scoreRef.current,
             streak: bestStreakRef.current,
-            is_correct: true 
+            is_correct: true,
+            games_played: 1,
+            games_won: reason === "win" ? 1 : 0,
+            accuracy: Math.min(accuracy, 100)
           }
         });
       }
