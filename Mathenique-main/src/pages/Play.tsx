@@ -214,7 +214,7 @@ export default function Play() {
     setGameState("menu");
   };
 
-  const endGame = (reason: "win" | "lose" | "timeout") => {
+  const endGame = async (reason: "win" | "lose" | "timeout") => {
     if (gameMode === "challenge") {
       updateStats({
         challengeHighScore: Math.max(stats.challengeHighScore, scoreRef.current),
@@ -227,6 +227,21 @@ export default function Play() {
         apocalypseHighScore: Math.max(stats.apocalypseHighScore, scoreRef.current),
         apocalypseBestStreak: Math.max(stats.apocalypseBestStreak, bestStreakRef.current),
       });
+    }
+
+    // Update Leaderboard
+    try {
+      if (scoreRef.current > 0) {
+        await api.post("/leaderboard/add-score", null, {
+          params: {
+            points: scoreRef.current,
+            streak: bestStreakRef.current,
+            is_correct: true 
+          }
+        });
+      }
+    } catch (error) {
+      console.error("Failed to update leaderboard:", error);
     }
 
     setGameState(reason === "win" ? "won" : (reason === "lose" ? "lost" : "ended"));
