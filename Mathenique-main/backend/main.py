@@ -857,17 +857,18 @@ def get_global_leaderboard(
     ).offset(skip).limit(limit).all()
     
     result = []
-    for rank, entry in enumerate(leaderboard_entries, start=skip + 1):
+    for i, entry in enumerate(leaderboard_entries):
         user = entry.user
-        result.append(LeaderboardResponse(
-            rank=rank,
-            user_name=user.name,
-            score=entry.total_score,
-            games_won=entry.games_won,
-            games_played=entry.games_played,
-            accuracy=round(entry.average_accuracy, 2),
-            streak=entry.highest_streak
-        ))
+        if user:  # Only add if user exists
+            result.append(LeaderboardResponse(
+                rank=skip + i + 1,
+                user_name=user.name,
+                score=entry.total_score,
+                games_won=entry.games_won,
+                games_played=entry.games_played,
+                accuracy=round(entry.average_accuracy, 2),
+                streak=entry.highest_streak
+            ))
     
     return result
 
