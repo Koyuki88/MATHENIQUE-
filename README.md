@@ -2,7 +2,6 @@
 
 **Mathenique** is a modern, gamified mathematics learning platform designed to make mastering math concepts engaging and competitive. Built with a robust React frontend and a high-performance FastAPI backend, it features interactive lessons, real-time quizzes, and a global leaderboard system.
 
-![Mathenique Preview](public/preview.png)
 
 ## 🚀 Features
 
