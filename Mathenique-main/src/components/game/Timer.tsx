@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Clock } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { soundEngine } from "@/lib/sound";
 
 interface TimerProps {
   seconds: number;
@@ -40,6 +41,12 @@ export function Timer({ seconds, isRunning, onTimeUp, className }: TimerProps) {
 
   const percentage = (timeLeft / seconds) * 100;
   const isLow = percentage <= 30;
+
+  useEffect(() => {
+    if (isRunning && isLow && timeLeft > 0) {
+      soundEngine.playTick(timeLeft <= 3);
+    }
+  }, [timeLeft, isRunning, isLow]);
 
   return (
     <div className={cn("flex items-center gap-3", className)}>

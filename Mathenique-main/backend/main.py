@@ -1,771 +1,161 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Query
-from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+import os
 from random import shuffle
+import uuid
 
-from backend.database import SessionLocal, Base, engine
-from backend.models import User, Progress, LessonProgress, Question, Leaderboard
-from backend.schemas import UserCreate, Token, StatsUpdate, QuestionOut, LessonProgressCreate, LessonProgressOut, LeaderboardResponse, UserRankResponse
-from backend.auth import verify_password, create_access_token, hash_password, get_current_user
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from backend.auth import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    verify_password,
+)
+from backend.database import Base, SessionLocal, engine, get_db
+from backend.models import GameSession, Leaderboard, LessonProgress, Progress, Question, User
+from backend.questions_seed import seed_questions
+from backend.schemas import (
+    AnswerSubmitRequest,
+    AnswerSubmitResponse,
+    GameFinishResponse,
+    GameStartRequest,
+    GameStartResponse,
+    GameTimeoutResponse,
+    LeaderboardResponse,
+    LessonProgressOut,
+    QuestionOut,
+    StatsOut,
+    Token,
+    UserCreate,
+    UserRankResponse,
+)
+from backend.security import rate_limit, rate_limiter
+
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+IS_PRODUCTION = ENVIRONMENT == "production"
+
+LESSON_META: dict[int, tuple[str, int]] = {
+    1: ("algebra", 1),
+    2: ("algebra", 2),
+    3: ("geometry", 1),
+    4: ("geometry", 2),
+    5: ("trigonometry", 1),
+    6: ("trigonometry", 2),
+}
+
+_DEFAULT_PROD_ORIGINS = [
+    "https://mathenique-1.onrender.com",
+    "https://mathenique-frontend.onrender.com",
+    "https://mathenique-frontend-w2uu.onrender.com",
+]
+_DEFAULT_DEV_ORIGINS = [
+    *_DEFAULT_PROD_ORIGINS,
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
 
 
-Base.metadata.create_all(bind=engine)
+def _parse_csv_env(name: str) -> list[str]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
-app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://mathenique-1.onrender.com",
-        "https://mathenique-frontend.onrender.com",
-        "https://mathenique-frontend-w2uu.onrender.com",
-        "http://localhost:8080",
-        "http://localhost:5173",
-        "http://127.0.0.1:8080",
-        "http://localhost:8082",
-        "http://127.0.0.1:8082",
-        "http://localhost:8083",
-        "http://127.0.0.1:8083"
-    ], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        if db.query(Question).count() == 0:
+            seed_questions(db)
+        else:
+            legacy_trig = (
+                db.query(Question)
+                .filter(Question.text == "If cos X = a/b, then sin X is equal to:")
+                .first()
+            )
+            if legacy_trig and legacy_trig.options == [
+                "(b2-a2)/b",
+                "(b-a)/b",
+                "√(b2-a2)/b",
+                "√(b-a)/b",
+            ]:
+                legacy_trig.options = ["(b^2-a^2)/b", "(b-a)/b", "√(b^2-a^2)/b", "√(b-a)/b"]
+                db.commit()
+    except IntegrityError:
+        db.rollback()
+    finally:
+        db.close()
+    yield
+
+
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+allowed_hosts = _parse_csv_env("ALLOWED_HOSTS") or (
+    ["*.onrender.com"]
+    if IS_PRODUCTION
+    else ["localhost", "127.0.0.1", "0.0.0.0", "testserver"]
+)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
-def seed_questions():
-    db = SessionLocal()
-    try:
-        QUESTIONS = [
-            {
-                "text" : "Solve: x + 5 = 12",
-                "options" : ["6", "7", "8", "9"],
-                "correct_index" : 1,
-                "subject" : "algebra",
-                "difficulty" : 1,
-                "is_lesson" : 1,
-                "is_game" : 1
-            },
-            {
-                "text" : "Solve: 3x = 18",
-                "options" : ["3", "6", "9", "12"],
-                "correct_index" : 1,
-                "subject" : "algebra",
-                "difficulty" : 1,
-                "is_lesson" : 1,
-                "is_game" : 1
-            },
-            {
-                "text" : "Solve: x - 7 = 10",
-                "options" : ["17", "3", "9", "21"],
-                "correct_index" : 0,
-                "subject" : "algebra",
-                "difficulty" : 1,
-                "is_lesson" : 1,
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: 2x + 4 = 10",
-                "options" : ["6", "3", "14", "12"],
-                "correct_index" : 1,
-                "subject" : "algebra",
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Simplify: 5x + 3x", 
-                "options" : ["8", "8x", "2x", "2"], 
-                "correct_index" : 1, 
-                "subject" : "algebra", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: 2x + 5 = 3x - 7", 
-                "options" : ["10", "12", "14", "16"],
-                "correct_index" : 1, 
-                "subject" : "algebra", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1
-            },
-            {
-                "text" : "Solve: x (x - 4) = 0", 
-                "options" : ["4, 0", "0, 4", "3, 2", "5, 4"], 
-                "correct_index" : 1, 
-                "subject" : "algebra",
-                "difficulty" : 2,
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Simplify: (2x - 3) (x + 1)", 
-                "options" : ["2x^2 - x - 3", "3x - 2", "3x + 2", "2x^2 - x + 3"], 
-                "correct_index" : 0, 
-                "subject" : "algebra", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "Solve: 3 (x + 2) = 2x + 11", 
-                "options" : ["7", "4", "6", "5"], 
-                "correct_index" : 3, 
-                "subject" : "algebra", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: 4x - 7 = 2 (2x - 5)", 
-                "options" : ["16", "21", "No Solution", "29"], 
-                "correct_index" : 2, 
-                "subject" : "algebra", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the perimeter of a square with side 4", 
-                "options" : ["10", "11", "16", "13"], 
-                "correct_index" : 2, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the area of a rectangle: length 6, width 3", 
-                "options" : ["36", "40", "18", "48"], 
-                "correct_index" : 2, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "How many degrees are in a triangle?", 
-                "options" : ["360°", "180°", "90°", "60°"], 
-                "correct_index" : 1, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the circumference of a circle with radius 7", 
-                "options" : ["8π", "14π", "12π", "10π"], 
-                "correct_index" : 1, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the area of a square with side 5", 
-                "options" : ["10", "15", "25", "20"], 
-                "correct_index" : 2, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the hypotenuse if legs are 6 and 8", 
-                "options" : ["9", "10", "11", "12"], 
-                "correct_index" : 1, 
-                "subject" : "geometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the area of a trapezoid with bases 6 and 10, height 4", 
-                "options" : ["40", "32", "20", "46"], 
-                "correct_index" : 1, 
-                "subject" : "geometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the circumference if diameter is 14", 
-                "options" : ["7π", "28π", "14π", "15π"], 
-                "correct_index" : 2, 
-                "subject" : "geometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the area of a circle with diameter 10", 
-                "options" : ["20π", "25π", "5π", "10π"], 
-                "correct_index" : 1, 
-                "subject" : "geometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the missing angle in a triangle with angles 35° and 65°", 
-                "options" : ["15°", "70°", "80°", "45°"], 
-                "correct_index" : 2, 
-                "subject" : "geometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find sin 0°", 
-                "options" : ["-1", "1/2", "0", "1"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find cos 0°", 
-                "options" : ["0", "1", "1/2", "-1"], 
-                "correct_index" : 1, 
-                "subject" : "trigonometry",
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find sin 90°", 
-                "options" : ["1/3", "2/3", "1", "3/3"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find tan 45°", 
-                "options" : ["0", "-1", "1/2", "1"], 
-                "correct_index" : 3, 
-                "subject" : "trigonometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find sin 150°", 
-                "options" : ["0", "1", "1/2", "-1"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find cos 120°", 
-                "options" : ["1/4", "-1/2", "-1/4", "1"], 
-                "correct_index" : 1, 
-                "subject" : "trigonometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find tan 225°", 
-                "options" : ["1/2", "-1/2", "1", "-1"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Find the angle if sin θ = 1/2", 
-                "options" : ["45°, 75°", "20°, 160°", "30°, 150°", "60°, 90°"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Simplify: sin^2x + cos^2x", 
-                "options" : ["0", "-1", "-1/2", "1"], 
-                "correct_index" : 3, 
-                "subject" : "trigonometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 1, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: 7x - 3 = 11", 
-                "options" : ["0", "3", "2", "1"], 
-                "correct_index" : 2, 
-                "subject" : "algebra", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: x/4 = 6", 
-                "options" : ["24", "23", "22", "21"], 
-                "correct_index" : 0,
-                "subject" : "algebra", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Simplify: 7(x + 2)", 
-                "options" : ["7x + 9", "7x + 14", "7x - 14", "7x - 9"], 
-                "correct_index" : 1, 
-                "subject" : "algebra", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "Solve: x + x = 14", 
-                "options" : ["5", "4", "7", "8"], 
-                "correct_index" : 2, 
-                "subject" : "algebra", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: 2(x - 3) = 8", 
-                "options" : ["4", "5", "6", "7"], 
-                "correct_index" : 3, 
-                "subject" : "algebra", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: x^2 = 16", 
-                "options" : ["1", "3", "2", "4"], 
-                "correct_index" : 3, 
-                "subject" : "algebra", 
-                "difficulty" : 2, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: x^2 + 2x = 8", 
-                "options" : ["0", "3", "2", "1"], 
-                "correct_index" : 2, 
-                "subject" : "algebra", 
-                "difficulty" : 2, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Simplify: 6x/3", 
-                "options" : ["16x", "2x", "25x", "6x"], 
-                "correct_index" : 1, 
-                "subject" : "algebra", 
-                "difficulty" : 2, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Simplify (x + 3)^2", 
-                "options" : ["2x^2 + 6x + 9", "2x^2 + 6x - 9", "2x^2 - 6x + 9", "2x^2 - 6x - 9"], 
-                "correct_index" : 0, 
-                "subject" : "algebra", 
-                "difficulty" : 3, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            {
-                "text" : "Solve: x/3 + x/6 = 3", 
-                "options" : ["9", "18", "6", "3"], 
-                "correct_index" : 1, 
-                "subject" : "algebra", 
-                "difficulty" : 3, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "Find the height of a rectangle with an area of 28 and and length of 4", 
-                "options" : ["5", "7", "9", "11"], 
-                "correct_index" : 1, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1
-            },
-            { 
-                "text" : "Find the missing angle in a triangle with angles 35° and 95°",
-                "options" : ["20°", "65°", "45°", "50°"], 
-                "correct_index" : 3, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "Find the area of a square with a side length of 6", 
-                "options" : ["24", "30", "36", "42"], 
-                "correct_index" : 2, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "A right angle has how many degrees?", 
-                "options" : ["180°", "0°", "45°", "90°"], 
-                "correct_index" : 3, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "How many degrees does an obtuse angle have?", 
-                "options" : [">90°", "<90°", ">180°", "<180°"], 
-                "correct_index" : 0, 
-                "subject" : "geometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1
-            },
-            { 
-                "text" : "Find the volume of a cube with an edge length of 7", 
-                "options" : ["343", "56", "49", "21"], 
-                "correct_index" : 0, 
-                "subject" : "geometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "If the two angles of a triangle are 50° and 70° , respectively, then the third angle will be _______.", 
-                "options" : ["10°", "20°", "45°", "60°"], 
-                "correct_index" : 3, 
-                "subject" : "geometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "3 angles of a triangle add up to ______ degree.", 
-                "options" : ["120°", "90°", "175°", "180°"], 
-                "correct_index" : 3, 
-                "subject" : "geometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "Semicircle features ________ dimensions.", 
-                "options" : ["2", "3", "4", "5"], 
-                "correct_index" : 0, 
-                "subject" : "geometry", 
-                "difficulty" : 3, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "In a 30-60-90 triangle, the length of the hypotenuse is 6. What is the length of the shortest side?", 
-                "options" : ["2", "3", "6", "5"], 
-                "correct_index" : 1, 
-                "subject" : "geometry", 
-                "difficulty" : 3, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "In ∆ ABC, right-angled at B, AB = 24 cm, BC = 7 cm. The value of tan C is:", 
-                "options" : ["12/7", " 24/7", " 20/7", "7/24"], 
-                "correct_index" : 1, 
-                "subject" : "trigonometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "The value of tan 60°/cot 30° is equal to:", 
-                "options" : ["0", "1", "4", "5"], 
-                "correct_index" : 1, 
-                "subject" : "trigonometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "sin (90° - A) and cos A are:", 
-                "options" : ["not related", "different", "same", "none of the above"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "If cos X = ⅔ then tan X is equal to:", 
-                "options" : ["5/2", "√(5/2)", "√5/2", "2/√5"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "The value of (sin 45° + cos 45°) is ", 
-                "options" : [" 1/√2", "√3/2", "1", "√2"], 
-                "correct_index" : 3, 
-                "subject" : "trigonometry", 
-                "difficulty" : 1, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "If ∆ABC is right angled at C, then the value of cos(A+B) is", 
-                "options" : ["0", "1", "1/2", "√3/2"], 
-                "correct_index" : 0, 
-                "subject" : "trigonometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "The value of (tan 1° tan 2° tan 3° … tan 89°) is", 
-                "options" : ["0", "1", "2", " 1/2"], 
-                "correct_index" : 1, 
-                "subject" : "trigonometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "If cos X = a/b, then sin X is equal to:", 
-                "options" : ["(b2-a2)/b", "(b-a)/b", "√(b2-a2)/b", "√(b-a)/b"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 2, 
-                "is_lesson" : 0,
-                "is_game" : 1 
-            },
-            { 
-                "text" : "sin 2A = 2 sin A is true when A =", 
-                "options" : ["30°", "45°", "0°", "50°"], 
-                "correct_index" : 2, 
-                "subject" : "trigonometry", 
-                "difficulty" : 3, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-            { 
-                "text" : "The value of sin 60° cos 30° + sin 30° cos 60° is:", 
-                "options" : ["1", "0", "2", "3"], 
-                "correct_index" : 0, 
-                "subject" : "trigonometry", 
-                "difficulty" : 3, 
-                "is_lesson" : 0, 
-                "is_game" : 1 
-            },
-        ]
-
-        for q in QUESTIONS:
-            exists = db.query(Question).filter(
-                Question.text == q["text"]
-            ).first()
-
-            if not exists:
-                db.add(Question(**q))
-
-        db.commit()
-    finally:
-        db.close()
-
-db = SessionLocal()
-try:
-    if db.query(Question).count() == 0:
-        seed_questions()
-finally:
-    db.close()
-
-@app.get("/me")
-def get_me(user_id: int = Depends(get_current_user), db: Session = Depends(get_db)):
-    user = db.query(User).get(user_id)
-    return {
-        "id": user.id,
-        "email": user.email,
-        "name": user.name
-    }
-
-@app.get("/profile")
-def profile(user_id: int = Depends(get_current_user)):
-    return {"id": user_id}
-
-@app.get("/lessons/progress")
-def get_lesson_progress(
-    user_id: int = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    return db.query(LessonProgress).filter(
-        LessonProgress.user_id == user_id
-    ).all()
-
-@app.get("/questions", response_model=list[QuestionOut])
-def get_questions(
-    mode: str | None = None,  # normal | mixed | challenge | apocalypse
-    count: int = 10,
-    subject: str | None = None,
-    is_lesson: bool = Query(False),
-    db: Session = Depends(get_db),
-):
-    query = db.query(Question)
-
-    if is_lesson:
-        query = query.filter(Question.is_lesson == 1)
-
-    if subject:
-        query = query.filter(Question.subject == subject)
-
-    if mode == "challenge":
-        query = query.filter(Question.difficulty <= 2)
-    elif mode == "apocalypse":
-        query = query.filter(Question.difficulty <= 3)
-
-    questions = query.all()
-    shuffle(questions)
-
-    return questions[:count]
-
-@app.post("/register", status_code=201)
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.email == user.email).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Email already registered"
-        )
-
-    new_user = User(
-        name=user.name,
-        email=user.email,
-        password_hash=hash_password(user.password)
-    )
-
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    return {
-        "id": new_user.id,
-        "email": new_user.email,
-        "name": new_user.name,
-        "message": "User registered successfully"
-    }
-
-@app.post("/login", response_model=Token)
-def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db)
-):
-    db_user = db.query(User).filter(User.email == form_data.username).first()
-
-    if not db_user or not verify_password(form_data.password, db_user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
-
-    access_token = create_access_token(
-        data={"sub": str(db_user.id),"email": db_user.email}
-    )
-
-    return {
-        "access_token": access_token,
-        "token_type": "bearer"
-    }
-
-# Save lesson progress
-@app.post("/lessons/progress", response_model=LessonProgressOut)
-def save_lesson_progress(
-    data: LessonProgressCreate,
-    user: int = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    progress = (
-        db.query(LessonProgress)
-        .filter_by(user_id=user, lesson_id=data.lesson_id)
-        .first()
-    )
-
-    if progress:
-        progress.stars = max(progress.stars, data.stars)
-        progress.completed = True
-    else:
-        progress = LessonProgress(
-            user_id=user,
-            lesson_id=data.lesson_id,
-            stars=data.stars,
-            completed=True,
-        )
-        db.add(progress)
-
-    db.commit()
-    db.refresh(progress)
-
-    return progress
+allowed_origins = _parse_csv_env("ALLOWED_ORIGINS") or (
+    _DEFAULT_PROD_ORIGINS if IS_PRODUCTION else _DEFAULT_DEV_ORIGINS
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_origin_regex=(
+        None
+        if IS_PRODUCTION
+        else r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+    ),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
-@app.get("/stats")
-def get_stats(
-    user_id: int = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    user = db.query(User).get(user_id)
-    progress = db.query(Progress).filter(Progress.user_id == user.id).first()
-    
-    if not progress:
-        return {
-            "total_questions": 0,
-            "correct_answers": 0,
-            "games_played": 0,
-            "challenge_best_streak": 0,
-            "apocalypse_best_streak": 0,
-            "lessons_completed": 0,
-            "challenge_high_score": 0,
-            "apocalypse_high_score": 0
-        }
-    
-    return {
-        "total_questions": progress.total_questions,
-        "correct_answers": progress.correct_answers,
-        "games_played": progress.games_played,
-        "challenge_best_streak": progress.challenge_best_streak,
-        "apocalypse_best_streak": progress.apocalypse_best_streak,
-        "lessons_completed": progress.lessons_completed,
-        "challenge_high_score": progress.challenge_high_score,
-        "apocalypse_high_score": progress.apocalypse_high_score
-    }
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    response.headers["Cache-Control"] = "no-store"
+    if IS_PRODUCTION:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
-@app.put("/stats")
-def update_stats(
-    data: StatsUpdate,
-    user_id: int = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    user = db.query(User).get(user_id)
-    progress = db.query(Progress).filter(Progress.user_id == user.id).first()
-    
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _ensure_progress(user_id: int, db: Session) -> Progress:
+    progress = db.query(Progress).filter(Progress.user_id == user_id).first()
     if not progress:
         progress = Progress(
-            user_id=user.id,
+            user_id=user_id,
             total_questions=0,
             correct_answers=0,
             games_played=0,
@@ -776,169 +166,737 @@ def update_stats(
             apocalypse_high_score=0,
         )
         db.add(progress)
-    
-    progress.total_questions = data.total_questions
-    progress.correct_answers = data.correct_answers
-    progress.games_played = data.games_played
-    progress.challenge_best_streak = data.challenge_best_streak
-    progress.apocalypse_best_streak = data.apocalypse_best_streak
-    progress.lessons_completed = data.lessons_completed
-    progress.challenge_high_score = data.challenge_high_score
-    progress.apocalypse_high_score = data.apocalypse_high_score
-    
-    db.commit()
-    
-    return {"message": "Stats updated"}
-
-# Leaderboard Endpoints
-def calculate_points(difficulty: int, correct: bool, time_taken: int) -> int:
-    """Calculate points based on difficulty, correctness, and speed"""
-    base_points = difficulty * 10
-    if correct:
-        speed_bonus = max(0, 50 - time_taken) // 5  # Bonus for fast answers
-        return base_points + speed_bonus
-    return 0
+        db.flush()
+    return progress
 
 
-def initialize_leaderboard_entry(user_id: int, db: Session):
-    """Create leaderboard entry for new user"""
+def _stats_out(progress: Progress | None) -> StatsOut:
+    if not progress:
+        return StatsOut(
+            total_questions=0,
+            correct_answers=0,
+            games_played=0,
+            challenge_best_streak=0,
+            apocalypse_best_streak=0,
+            lessons_completed=0,
+            challenge_high_score=0,
+            apocalypse_high_score=0,
+        )
+    return StatsOut(
+        total_questions=progress.total_questions,
+        correct_answers=progress.correct_answers,
+        games_played=progress.games_played,
+        challenge_best_streak=progress.challenge_best_streak,
+        apocalypse_best_streak=progress.apocalypse_best_streak,
+        lessons_completed=progress.lessons_completed,
+        challenge_high_score=progress.challenge_high_score,
+        apocalypse_high_score=progress.apocalypse_high_score,
+    )
+
+
+def initialize_leaderboard_entry(user_id: int, db: Session) -> Leaderboard:
+    """Create leaderboard entry for user if missing."""
     existing = db.query(Leaderboard).filter(Leaderboard.user_id == user_id).first()
-    if not existing:
-        leaderboard = Leaderboard(user_id=user_id)
-        db.add(leaderboard)
-        db.commit()
-        db.refresh(leaderboard)
-    return existing or leaderboard
+    if existing:
+        return existing
+    leaderboard = Leaderboard(user_id=user_id)
+    db.add(leaderboard)
+    db.flush()
+    return leaderboard
 
 
-@app.post("/leaderboard/add-score")
-def add_score(
-    points: int,
-    is_correct: bool = True,
-    streak: int = 0,
-    games_played: int = 0,
-    games_won: int = 0,
-    accuracy: float = 0.0,
+def _get_completed_lesson_ids(user_id: int, db: Session) -> set[int]:
+    rows = (
+        db.query(LessonProgress.lesson_id)
+        .filter(
+            LessonProgress.user_id == user_id,
+            LessonProgress.completed >= 1,
+        )
+        .all()
+    )
+    return {row[0] for row in rows if row[0] in LESSON_META}
+
+
+@app.get("/")
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/me")
+def get_me(user_id: int = Depends(get_current_user), db: Session = Depends(get_db)):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+    }
+
+
+@app.get("/profile")
+def profile(user_id: int = Depends(get_current_user)):
+    return {"id": user_id}
+
+
+@app.get("/lessons/progress", response_model=list[LessonProgressOut])
+def get_lesson_progress(
     user_id: int = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """Update user's leaderboard score"""
-    leaderboard = db.query(Leaderboard).filter(Leaderboard.user_id == user_id).first()
-    
-    if not leaderboard:
-        leaderboard = initialize_leaderboard_entry(user_id, db)
-    
-    leaderboard.total_score += points
-    if games_won > 0:
-        leaderboard.games_won = games_won
-    if games_played > 0:
-        leaderboard.games_played = games_played
-    if accuracy > 0:
-        leaderboard.average_accuracy = accuracy
-    if streak > leaderboard.highest_streak:
-        leaderboard.highest_streak = streak
-    
+    return (
+        db.query(LessonProgress)
+        .filter(LessonProgress.user_id == user_id)
+        .all()
+    )
+
+
+@app.get("/questions", response_model=list[QuestionOut])
+def get_questions(
+    mode: str | None = None,
+    count: int = Query(10, ge=1, le=50),
+    subject: str | None = None,
+    difficulty: int | None = Query(None, ge=1, le=3),
+    is_lesson: bool = Query(False),
+    _user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Question)
+
+    if is_lesson:
+        query = query.filter(Question.is_lesson == 1)
+
+    if subject:
+        query = query.filter(Question.subject == subject)
+
+    if difficulty is not None:
+        query = query.filter(Question.difficulty == difficulty)
+
+    if mode == "challenge":
+        query = query.filter(Question.difficulty <= 2)
+    elif mode == "apocalypse":
+        query = query.filter(Question.difficulty <= 3)
+
+    questions = query.all()
+    shuffle(questions)
+    return questions[:count]
+
+
+@app.post(
+    "/register",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("register", 5, 60))],
+)
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    existing_user = (
+        db.query(User).filter(func.lower(User.email) == user.email).first()
+    )
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered",
+        )
+
+    existing_name = (
+        db.query(User).filter(func.lower(User.name) == user.name.lower()).first()
+    )
+    if existing_name:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username already taken",
+        )
+
+    new_user = User(
+        name=user.name,
+        email=user.email,
+        password_hash=hash_password(user.password),
+    )
+
+    try:
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered",
+        )
+
+    return {
+        "id": new_user.id,
+        "email": new_user.email,
+        "name": new_user.name,
+        "message": "User registered successfully",
+    }
+
+
+@app.post(
+    "/login",
+    response_model=Token,
+    dependencies=[Depends(rate_limit("login", 10, 60))],
+)
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    normalized_email = form_data.username.strip().lower()
+    if not normalized_email or len(normalized_email) > 254 or len(form_data.password) > 128:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    rate_limiter.hit(f"login:account:{normalized_email}", 10, 60)
+
+    db_user = (
+        db.query(User).filter(func.lower(User.email) == normalized_email).first()
+    )
+    if not db_user or not verify_password(form_data.password, db_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    access_token = create_access_token(data={"sub": str(db_user.id)})
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+    }
+
+
+@app.get("/stats", response_model=StatsOut)
+def get_stats(
+    user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    progress = db.query(Progress).filter(Progress.user_id == user_id).first()
+    return _stats_out(progress)
+
+
+@app.post(
+    "/game/start",
+    response_model=GameStartResponse,
+    dependencies=[Depends(rate_limit("game_start", 30, 60))],
+)
+def start_game(
+    payload: GameStartRequest,
+    user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    completed_lessons = _get_completed_lesson_ids(user_id, db)
+
+    if payload.mode == "lesson":
+        if payload.lesson_id is None or payload.lesson_id not in LESSON_META:
+            raise HTTPException(status_code=400, detail="Valid lesson_id is required")
+
+        highest_completed = max(completed_lessons, default=0)
+        if payload.lesson_id > highest_completed + 1:
+            raise HTTPException(status_code=403, detail="Lesson is locked")
+
+        topic, lesson_diff = LESSON_META[payload.lesson_id]
+        primary = (
+            db.query(Question)
+            .filter(
+                Question.is_lesson == 1,
+                Question.subject == topic,
+                Question.difficulty == lesson_diff,
+            )
+            .all()
+        )
+        shuffle(primary)
+        selected = primary[:5]
+
+        if len(selected) < 5:
+            selected_ids = {q.id for q in selected}
+            fallback_query = db.query(Question).filter(
+                Question.is_lesson == 1,
+                Question.subject == topic,
+            )
+            if selected_ids:
+                fallback_query = fallback_query.filter(~Question.id.in_(selected_ids))
+            fallback = fallback_query.all()
+            shuffle(fallback)
+            selected.extend(fallback[: 5 - len(selected)])
+
+        ttl = timedelta(minutes=30)
+        subject = topic
+        lesson_id = payload.lesson_id
+    else:
+        if not completed_lessons:
+            raise HTTPException(
+                status_code=403,
+                detail="Complete at least one lesson to unlock the Arena",
+            )
+
+        if payload.mode == "normal":
+            if not payload.subject:
+                raise HTTPException(status_code=400, detail="Subject is required for normal mode")
+            unlocked_topics = {LESSON_META[lid][0] for lid in completed_lessons}
+            if payload.subject not in unlocked_topics:
+                raise HTTPException(status_code=403, detail="Subject is locked")
+            query = db.query(Question).filter(
+                Question.is_game == 1,
+                Question.subject == payload.subject,
+            )
+            count = 10
+            ttl = timedelta(minutes=30)
+            subject = payload.subject
+        else:
+            if len(completed_lessons) < len(LESSON_META):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Complete all lessons to unlock this mode",
+                )
+            query = db.query(Question).filter(Question.is_game == 1)
+            if payload.mode == "challenge":
+                query = query.filter(Question.difficulty <= 2)
+                count = 10
+                ttl = timedelta(minutes=10)
+            elif payload.mode == "apocalypse":
+                query = query.filter(Question.difficulty <= 3)
+                count = 30
+                ttl = timedelta(seconds=90)
+            else:
+                count = 10
+                ttl = timedelta(minutes=30)
+            subject = None
+
+        pool = query.all()
+        shuffle(pool)
+        selected = pool[:count]
+        lesson_id = None
+
+    if not selected:
+        raise HTTPException(status_code=404, detail="No questions available for this mode")
+
+    now = _utc_now()
+    session = GameSession(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        mode=payload.mode,
+        lesson_id=lesson_id,
+        subject=subject,
+        question_ids=[q.id for q in selected],
+        answered_ids=[],
+        correct_count=0,
+        total_answered=0,
+        score=0,
+        current_streak=0,
+        best_streak=0,
+        lives=3,
+        status="active",
+        finalized=False,
+        created_at=now,
+        expires_at=now + ttl,
+    )
+    db.add(session)
     db.commit()
-    db.refresh(leaderboard)
-    
-    return {"score_added": points, "total_score": leaderboard.total_score}
+
+    return GameStartResponse(
+        session_id=session.id,
+        mode=session.mode,
+        questions=[QuestionOut.model_validate(q) for q in selected],
+    )
 
 
-@app.get("/leaderboard/global", response_model=list[LeaderboardResponse])
+@app.post(
+    "/game/{session_id}/answer",
+    response_model=AnswerSubmitResponse,
+    dependencies=[Depends(rate_limit("game_answer", 120, 60))],
+)
+def submit_answer(
+    session_id: str,
+    payload: AnswerSubmitRequest,
+    user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = (
+        db.query(GameSession)
+        .filter(GameSession.id == session_id, GameSession.user_id == user_id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Game session not found")
+
+    if session.status != "active":
+        raise HTTPException(status_code=400, detail="Game session is no longer active")
+
+    if _utc_now() > _as_utc(session.expires_at):
+        session.status = "ended" if session.mode == "apocalypse" else "lost"
+        db.commit()
+        raise HTTPException(status_code=400, detail="Game session has expired")
+
+    answered_list = list(session.answered_ids or [])
+    question_ids = list(session.question_ids or [])
+    if not question_ids:
+        raise HTTPException(status_code=400, detail="Invalid session state")
+
+    if session.mode == "apocalypse":
+        expected_idx = len(answered_list) % len(question_ids)
+    else:
+        if len(answered_list) >= len(question_ids):
+            raise HTTPException(status_code=400, detail="All questions already answered")
+        expected_idx = len(answered_list)
+
+    expected_question_id = question_ids[expected_idx]
+    if payload.question_id != expected_question_id:
+        raise HTTPException(status_code=400, detail="Unexpected question for current step")
+
+    question = db.get(Question, payload.question_id)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    is_correct = payload.selected_index == question.correct_index
+
+    answered_list.append(payload.question_id)
+    session.answered_ids = answered_list
+    session.total_answered += 1
+
+    progress = _ensure_progress(user_id, db)
+    progress.total_questions += 1
+
+    points_earned = 0
+    if is_correct:
+        progress.correct_answers += 1
+        session.correct_count += 1
+        session.current_streak += 1
+        session.best_streak = max(session.best_streak, session.current_streak)
+        if session.mode != "lesson":
+            points_earned = 10 if session.mode == "normal" else 20
+            session.score += points_earned
+    else:
+        session.lives = max(0, session.lives - 1)
+        session.current_streak = 0
+
+    if session.lives <= 0:
+        session.status = "lost"
+    elif session.mode != "apocalypse" and len(answered_list) >= len(question_ids):
+        session.status = "won"
+
+    if session.mode in ("normal", "mixed", "challenge", "apocalypse"):
+        leaderboard = initialize_leaderboard_entry(user_id, db)
+        if is_correct:
+            leaderboard.total_score += points_earned
+            leaderboard.highest_streak = max(leaderboard.highest_streak, session.best_streak)
+        leaderboard.average_accuracy = (
+            round((progress.correct_answers / progress.total_questions) * 100, 2)
+            if progress.total_questions > 0
+            else 0.0
+        )
+
+    db.commit()
+
+    return AnswerSubmitResponse(
+        is_correct=is_correct,
+        correct_index=question.correct_index,
+        points_earned=points_earned,
+        score=session.score,
+        streak=session.current_streak,
+        best_streak=session.best_streak,
+        lives=session.lives,
+        status=session.status,
+    )
+
+
+@app.post(
+    "/game/{session_id}/timeout",
+    response_model=GameTimeoutResponse,
+    dependencies=[Depends(rate_limit("game_timeout", 60, 60))],
+)
+def handle_game_timeout(
+    session_id: str,
+    user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = (
+        db.query(GameSession)
+        .filter(GameSession.id == session_id, GameSession.user_id == user_id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Game session not found")
+
+    if session.status != "active":
+        return GameTimeoutResponse(
+            lives=session.lives,
+            score=session.score,
+            best_streak=session.best_streak,
+            status=session.status,
+        )
+
+    if session.mode == "apocalypse":
+        session.status = "ended"
+    elif session.mode == "challenge":
+        answered_list = list(session.answered_ids or [])
+        question_ids = list(session.question_ids or [])
+        if len(answered_list) < len(question_ids):
+            answered_list.append(question_ids[len(answered_list)])
+            session.answered_ids = answered_list
+
+        session.lives = max(0, session.lives - 1)
+        session.current_streak = 0
+
+        if session.lives <= 0:
+            session.status = "lost"
+        elif len(answered_list) >= len(question_ids):
+            session.status = "won"
+    else:
+        raise HTTPException(status_code=400, detail="Timeout only applies to timed modes")
+
+    db.commit()
+
+    return GameTimeoutResponse(
+        lives=session.lives,
+        score=session.score,
+        best_streak=session.best_streak,
+        status=session.status,
+    )
+
+
+@app.post(
+    "/game/{session_id}/finish",
+    response_model=GameFinishResponse,
+    dependencies=[Depends(rate_limit("game_finish", 30, 60))],
+)
+def finish_game(
+    session_id: str,
+    user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = (
+        db.query(GameSession)
+        .filter(GameSession.id == session_id, GameSession.user_id == user_id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Game session not found")
+
+    if session.status == "active":
+        if session.mode == "apocalypse" and _utc_now() >= _as_utc(session.expires_at):
+            session.status = "ended"
+        else:
+            raise HTTPException(status_code=400, detail="Game session is still active")
+
+    # Atomically claim finalization so a session cannot be scored twice concurrently
+    claimed = (
+        db.query(GameSession)
+        .filter(
+            GameSession.id == session.id,
+            GameSession.user_id == user_id,
+            GameSession.finalized.is_(False),
+        )
+        .update({"finalized": True}, synchronize_session=False)
+    )
+
+    progress = _ensure_progress(user_id, db)
+    stars: int | None = None
+
+    if session.mode == "lesson" and session.status == "won" and session.lesson_id is not None:
+        total_q = max(1, len(session.question_ids or []))
+        if session.correct_count >= total_q:
+            stars = 3
+        elif session.correct_count >= total_q - 1:
+            stars = 2
+        else:
+            stars = 1
+
+        if claimed == 1:
+            lp = (
+                db.query(LessonProgress)
+                .filter(
+                    LessonProgress.user_id == user_id,
+                    LessonProgress.lesson_id == session.lesson_id,
+                )
+                .first()
+            )
+            if lp:
+                lp.stars = max(lp.stars, stars)
+                lp.completed = 1
+            else:
+                db.add(
+                    LessonProgress(
+                        user_id=user_id,
+                        lesson_id=session.lesson_id,
+                        stars=stars,
+                        completed=1,
+                    )
+                )
+            db.flush()
+            progress.lessons_completed = (
+                db.query(LessonProgress)
+                .filter(LessonProgress.user_id == user_id, LessonProgress.completed >= 1)
+                .count()
+            )
+    elif session.mode in ("normal", "mixed", "challenge", "apocalypse") and claimed == 1:
+        progress.games_played += 1
+        if session.mode == "challenge":
+            progress.challenge_high_score = max(progress.challenge_high_score, session.score)
+            progress.challenge_best_streak = max(progress.challenge_best_streak, session.best_streak)
+        elif session.mode == "apocalypse":
+            progress.apocalypse_high_score = max(progress.apocalypse_high_score, session.score)
+            progress.apocalypse_best_streak = max(progress.apocalypse_best_streak, session.best_streak)
+
+        leaderboard = initialize_leaderboard_entry(user_id, db)
+        leaderboard.games_played += 1
+        if session.status == "won":
+            leaderboard.games_won += 1
+        leaderboard.highest_streak = max(leaderboard.highest_streak, session.best_streak)
+        leaderboard.average_accuracy = (
+            round((progress.correct_answers / progress.total_questions) * 100, 2)
+            if progress.total_questions > 0
+            else 0.0
+        )
+
+    db.commit()
+    db.refresh(progress)
+
+    return GameFinishResponse(
+        status=session.status,
+        score=session.score,
+        best_streak=session.best_streak,
+        stars=stars,
+        stats=_stats_out(progress),
+    )
+
+
+@app.get(
+    "/leaderboard/global",
+    response_model=list[LeaderboardResponse],
+    dependencies=[Depends(rate_limit("leaderboard_read", 240, 60))],
+)
 def get_global_leaderboard(
     skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=100),
-    db: Session = Depends(get_db)
+    _user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Get global leaderboard with pagination"""
-    leaderboard_entries = db.query(Leaderboard).order_by(
-        Leaderboard.total_score.desc(),
-        Leaderboard.last_updated.asc()
-    ).offset(skip).limit(limit).all()
-    
+    """Get global leaderboard with pagination."""
+    leaderboard_entries = (
+        db.query(Leaderboard)
+        .join(User, Leaderboard.user_id == User.id)
+        .options(joinedload(Leaderboard.user))
+        .order_by(Leaderboard.total_score.desc(), Leaderboard.last_updated.asc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
     result = []
     for i, entry in enumerate(leaderboard_entries):
-        user = entry.user
-        if user:  # Only add if user exists
-            result.append(LeaderboardResponse(
+        result.append(
+            LeaderboardResponse(
                 rank=skip + i + 1,
-                user_name=user.name,
+                user_name=entry.user.name,
                 score=entry.total_score,
                 games_won=entry.games_won,
                 games_played=entry.games_played,
                 accuracy=round(entry.average_accuracy, 2),
-                streak=entry.highest_streak
-            ))
-    
+                streak=entry.highest_streak,
+            )
+        )
+
     return result
 
 
-@app.get("/leaderboard/my-rank", response_model=UserRankResponse)
+@app.get(
+    "/leaderboard/my-rank",
+    response_model=UserRankResponse,
+    dependencies=[Depends(rate_limit("leaderboard_read", 240, 60))],
+)
 def get_my_rank(
     user_id: int = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """Get current user's rank on leaderboard"""
-    user = db.query(User).get(user_id)
-    leaderboard = db.query(Leaderboard).filter(Leaderboard.user_id == user_id).first()
-    
-    if not leaderboard:
-        leaderboard = initialize_leaderboard_entry(user_id, db)
-    
-    # Count how many users have higher scores
-    rank = db.query(Leaderboard).filter(
-        Leaderboard.total_score > leaderboard.total_score
-    ).count() + 1
-    
+    """Get current user's rank on leaderboard."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    leaderboard = initialize_leaderboard_entry(user_id, db)
+    db.commit()
+
+    rank = (
+        db.query(Leaderboard)
+        .filter(Leaderboard.total_score > leaderboard.total_score)
+        .count()
+        + 1
+    )
     total_players = db.query(Leaderboard).count()
-    
+
     return UserRankResponse(
         user_rank=rank,
         total_players=total_players,
         user_score=leaderboard.total_score,
-        user_name=user.name
+        user_name=user.name,
     )
 
 
-@app.get("/leaderboard/top-10")
-def get_top_10(db: Session = Depends(get_db)):
-    """Get top 10 players with quick access"""
-    top_players = db.query(Leaderboard).order_by(
-        Leaderboard.total_score.desc()
-    ).limit(10).all()
-    
+@app.get(
+    "/leaderboard/top-10",
+    dependencies=[Depends(rate_limit("leaderboard_read", 240, 60))],
+)
+def get_top_10(
+    _user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get top 10 players with quick access."""
+    top_players = (
+        db.query(Leaderboard)
+        .join(User, Leaderboard.user_id == User.id)
+        .options(joinedload(Leaderboard.user))
+        .order_by(Leaderboard.total_score.desc(), Leaderboard.last_updated.asc())
+        .limit(10)
+        .all()
+    )
+
     result = []
     for rank, entry in enumerate(top_players, start=1):
-        result.append({
-            "rank": rank,
-            "name": entry.user.name,
-            "score": entry.total_score,
-            "accuracy": round(entry.average_accuracy, 2)
-        })
-    
+        result.append(
+            {
+                "rank": rank,
+                "name": entry.user.name,
+                "score": entry.total_score,
+                "accuracy": round(entry.average_accuracy, 2),
+            }
+        )
+
     return result
 
 
-@app.get("/leaderboard/user/{user_name}")
+@app.get(
+    "/leaderboard/user/{user_name}",
+    dependencies=[Depends(rate_limit("leaderboard_read", 240, 60))],
+)
 def get_user_leaderboard(
     user_name: str,
-    db: Session = Depends(get_db)
+    _user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Get specific user's leaderboard stats"""
-    user = db.query(User).filter(User.name.ilike(user_name)).first()
-    
+    """Get specific user's leaderboard stats."""
+    cleaned_name = user_name.strip()
+    if not cleaned_name or len(cleaned_name) > 64:
+        raise HTTPException(status_code=400, detail="Invalid username")
+
+    user = (
+        db.query(User)
+        .filter(func.lower(User.name) == cleaned_name.lower())
+        .first()
+    )
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    leaderboard = db.query(Leaderboard).filter(Leaderboard.user_id == user.id).first()
-    
-    if not leaderboard:
-        leaderboard = initialize_leaderboard_entry(user.id, db)
-    
-    rank = db.query(Leaderboard).filter(
-        Leaderboard.total_score > leaderboard.total_score
-    ).count() + 1
-    
+
+    leaderboard = initialize_leaderboard_entry(user.id, db)
+    db.commit()
+
+    rank = (
+        db.query(Leaderboard)
+        .filter(Leaderboard.total_score > leaderboard.total_score)
+        .count()
+        + 1
+    )
+
     return {
         "rank": rank,
         "name": user.name,
@@ -946,5 +904,5 @@ def get_user_leaderboard(
         "games_won": leaderboard.games_won,
         "games_played": leaderboard.games_played,
         "accuracy": round(leaderboard.average_accuracy, 2),
-        "streak": leaderboard.highest_streak
+        "streak": leaderboard.highest_streak,
     }

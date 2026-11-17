@@ -57,7 +57,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(me.data);
 
       return true;
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.response?.status === 429) {
+        throw error;
+      }
       console.error("Login failed:", error);
       return false;
     }
@@ -75,20 +78,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     email: string,
     password: string
   ): Promise<boolean> => {
-    try {
-      await api.post("/register", {
-        name,
-        email,
-        password,
-      });
+    await api.post("/register", {
+      name,
+      email,
+      password,
+    });
 
-      return true;
-    } catch (err: any) {
-      if (err.response?.status === 409) {
-        return false;
-      }
-      throw err;
-    }
+    return true;
   };
 
   return (

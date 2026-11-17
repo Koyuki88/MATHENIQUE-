@@ -41,12 +41,25 @@ export default function Auth() {
         if (success) {
           toast.success("Account created! Log in to start your Mathenique adventure!");
           setIsLogin(true);
-        } else {
-          toast.error("Email already exists");
         }
       }
-    } catch (error) {
-      toast.error("Something went wrong. Please try again.");
+    } catch (error: any) {
+      console.error("Auth error:", error);
+      if (!error?.response) {
+        toast.error("Cannot reach server. Make sure the backend is running and CORS allows this origin.");
+        return;
+      }
+      const status = error.response.status;
+      const detail = error.response.data?.detail;
+      if (status === 429) {
+        toast.error(typeof detail === "string" ? detail : "Too many attempts. Please wait a moment.");
+      } else if (status === 422 && Array.isArray(detail) && detail[0]?.msg) {
+        toast.error(detail[0].msg);
+      } else if (typeof detail === "string") {
+        toast.error(detail);
+      } else {
+        toast.error(`Request failed (${status}). Please check the backend logs.`);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -81,6 +94,7 @@ export default function Auth() {
           {/* Tab Switcher */}
           <div className="flex bg-muted rounded-xl p-1 mb-6">
             <button
+              type="button"
               onClick={() => setIsLogin(true)}
               className={`flex-1 py-3 rounded-lg font-fredoka font-semibold transition-all ${
                 isLogin
@@ -91,6 +105,7 @@ export default function Auth() {
               Login
             </button>
             <button
+              type="button"
               onClick={() => setIsLogin(false)}
               className={`flex-1 py-3 rounded-lg font-fredoka font-semibold transition-all ${
                 !isLogin
@@ -117,6 +132,7 @@ export default function Auth() {
                   onChange={(e) => setName(e.target.value)}
                   className="h-12 rounded-xl border-2 border-primary/20 focus:border-primary"
                   required={!isLogin}
+                  maxLength={64}
                 />
               </div>
             )}
@@ -133,6 +149,7 @@ export default function Auth() {
                 onChange={(e) => setEmail(e.target.value)}
                 className="h-12 rounded-xl border-2 border-primary/20 focus:border-primary"
                 required
+                maxLength={254}
               />
             </div>
 
@@ -143,12 +160,13 @@ export default function Auth() {
               <Input
                 id="password"
                 type="password"
-                placeholder="Enter your password"
+                placeholder={isLogin ? "Enter your password" : "At least 8 characters"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="h-12 rounded-xl border-2 border-primary/20 focus:border-primary"
                 required
-                minLength={6}
+                minLength={isLogin ? 1 : 8}
+                maxLength={128}
               />
             </div>
 

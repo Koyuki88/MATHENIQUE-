@@ -1,5 +1,6 @@
 import { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { soundEngine } from "@/lib/sound";
 
 interface GameModeCardProps {
   title: string;
@@ -35,9 +36,14 @@ const variantStyles = {
 export function GameModeCard({ title, description, icon: Icon, variant, onClick }: GameModeCardProps) {
   const styles = variantStyles[variant];
 
+  const handleClick = () => {
+    soundEngine.playClick();
+    onClick();
+  };
+
   return (
     <button
-      onClick={onClick}
+      onClick={handleClick}
       className={cn(
         "relative w-full p-6 rounded-2xl transition-all duration-300",
         "hover:scale-105 hover:brightness-110 active:scale-100",

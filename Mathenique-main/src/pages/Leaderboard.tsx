@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { GameButton } from "@/components/ui/GameButton";
 import api from "@/api/axios";
-import { Navigation } from '@/components/layout/Navigation';
+import { Navigation } from "@/components/layout/Navigation";
+import { RefreshCw } from "lucide-react";
 
 interface LeaderboardEntry {
   rank: number;
@@ -27,54 +29,99 @@ export default function Leaderboard() {
   const [topPlayers, setTopPlayers] = useState<any[]>([]);
   const [userRank, setUserRank] = useState<UserRank | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
 
   const itemsPerPage = 10;
 
-  useEffect(() => {
-    fetchLeaderboardData();
-  }, [page]);
+  const fetchLeaderboardData = useCallback(
+    async (silent = false) => {
+      try {
+        if (silent) {
+          setRefreshing(true);
+        } else {
+          setLoading(true);
+        }
+        setError(null);
 
-  const fetchLeaderboardData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
+        const [globalRes, topRes, rankRes] = await Promise.all([
+          api.get(`/leaderboard/global?skip=${page * itemsPerPage}&limit=${itemsPerPage}`),
+          api.get("/leaderboard/top-10"),
+          api.get("/leaderboard/my-rank").catch(() => ({ data: null })),
+        ]);
 
-      const [globalRes, topRes, rankRes] = await Promise.all([
-        api.get(`/leaderboard/global?skip=${page * itemsPerPage}&limit=${itemsPerPage}`),
-        api.get("/leaderboard/top-10"),
-        api.get("/leaderboard/my-rank").catch(() => ({ data: null }))
-      ]);
-
-      setGlobalLeaderboard(globalRes.data);
-      setTopPlayers(topRes.data);
-      if (rankRes.data) {
-        setUserRank(rankRes.data);
+        setGlobalLeaderboard(globalRes.data);
+        setTopPlayers(topRes.data);
+        if (rankRes.data) {
+          setUserRank(rankRes.data);
+        }
+      } catch (err: any) {
+        if (!silent) {
+          setError(err.response?.data?.detail || "Failed to load leaderboard");
+        }
+        console.error(err);
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
       }
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to load leaderboard');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+    },
+    [page]
+  );
+
+  useEffect(() => {
+    fetchLeaderboardData(false);
+
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") {
+        fetchLeaderboardData(true);
+      }
+    };
+
+    const intervalId = window.setInterval(refreshIfVisible, 4000);
+    window.addEventListener("focus", refreshIfVisible);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshIfVisible);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [fetchLeaderboardData]);
 
   const getRankBadgeColor = (rank: number) => {
-    if (rank === 1) return 'bg-yellow-500';
-    if (rank === 2) return 'bg-gray-400';
-    if (rank === 3) return 'bg-amber-600';
-    return 'bg-blue-500';
+    if (rank === 1) return "bg-yellow-500";
+    if (rank === 2) return "bg-gray-400";
+    if (rank === 3) return "bg-amber-600";
+    return "bg-blue-500";
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800">
+    <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 pb-20 md:pt-24">
       <Navigation />
-      
+
       <div className="container mx-auto px-4 py-8">
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-white mb-2">Leaderboard</h1>
-          <p className="text-slate-300">See how you stack up against other players</p>
+        <div className="mb-8 flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-3 mb-2">
+              <h1 className="text-4xl font-bold text-white">Leaderboard</h1>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-semibold">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                Live
+              </span>
+            </div>
+            <p className="text-slate-300">See how you stack up against other players</p>
+          </div>
+
+          <GameButton
+            variant="secondary"
+            size="sm"
+            onClick={() => fetchLeaderboardData(true)}
+            disabled={refreshing}
+          >
+            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </GameButton>
         </div>
 
         {error && (
@@ -128,7 +175,9 @@ export default function Leaderboard() {
                         className="flex items-center justify-between p-4 bg-slate-700/50 rounded-lg hover:bg-slate-700 transition"
                       >
                         <div className="flex items-center gap-4 flex-1">
-                          <Badge className={`${getRankBadgeColor(player.rank)} text-white text-lg w-12 h-12 flex items-center justify-center rounded-full`}>
+                          <Badge
+                            className={`${getRankBadgeColor(player.rank)} text-white text-lg w-12 h-12 flex items-center justify-center rounded-full`}
+                          >
                             {player.rank}
                           </Badge>
                           <div>
@@ -169,13 +218,17 @@ export default function Leaderboard() {
                           className="flex items-center justify-between p-4 bg-slate-700/50 rounded-lg hover:bg-slate-700 transition"
                         >
                           <div className="flex items-center gap-4 flex-1">
-                            <Badge className={`${getRankBadgeColor(entry.rank)} text-white text-lg w-12 h-12 flex items-center justify-center rounded-full`}>
+                            <Badge
+                              className={`${getRankBadgeColor(entry.rank)} text-white text-lg w-12 h-12 flex items-center justify-center rounded-full`}
+                            >
                               {entry.rank}
                             </Badge>
                             <div className="min-w-0">
                               <p className="text-white font-semibold truncate">{entry.user_name}</p>
                               <div className="flex gap-4 text-sm text-slate-400">
-                                <span>{entry.games_won}/{entry.games_played} wins</span>
+                                <span>
+                                  {entry.games_won}/{entry.games_played} wins
+                                </span>
                                 <span>{entry.accuracy}% accuracy</span>
                                 <span>Streak: {entry.streak}</span>
                               </div>
@@ -197,9 +250,7 @@ export default function Leaderboard() {
                       >
                         Previous
                       </button>
-                      <p className="text-slate-400">
-                        Page {page + 1}
-                      </p>
+                      <p className="text-slate-400">Page {page + 1}</p>
                       <button
                         onClick={() => setPage(page + 1)}
                         disabled={globalLeaderboard.length < itemsPerPage}

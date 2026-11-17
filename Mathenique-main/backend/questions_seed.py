@@ -1,8 +1,6 @@
 from backend.database import SessionLocal
 from backend.models import Question
 
-db = SessionLocal()
-
 QUESTIONS = [
     {
         "text" : "Solve: x + 5 = 12",
@@ -510,7 +508,7 @@ QUESTIONS = [
     },
     { 
         "text" : "If cos X = a/b, then sin X is equal to:", 
-        "options" : ["(b2-a2)/b", "(b-a)/b", "√(b2-a2)/b", "√(b-a)/b"], 
+        "options" : ["(b^2-a^2)/b", "(b-a)/b", "√(b^2-a^2)/b", "√(b-a)/b"], 
         "correct_index" : 2, 
         "subject" : "trigonometry", 
         "difficulty" : 2, 
@@ -537,16 +535,24 @@ QUESTIONS = [
     },
 ]
 
-for q in QUESTIONS:
-    exists = db.query(Question).filter(
-        Question.text == q["text"]
-    ).first()
+def seed_questions(db=None) -> None:
+    owns_session = db is None
+    session = db if db is not None else SessionLocal()
+    try:
+        for q in QUESTIONS:
+            exists = session.query(Question).filter(
+                Question.text == q["text"]
+            ).first()
 
-    if not exists:
-        db.add(Question(**q))
+            if not exists:
+                session.add(Question(**q))
+
+        session.commit()
+    finally:
+        if owns_session:
+            session.close()
 
 
-db.commit()
-db.close()
-
-print("Success")
+if __name__ == "__main__":
+    seed_questions()
+    print("Success")

@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useRef, ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from "react";
 import { useAuth } from "./AuthContext";
 import api from "@/api/axios";
 
@@ -8,7 +8,7 @@ interface LessonProgress {
   completed: boolean;
 }
 
-interface GameStats {
+export interface GameStats {
   totalQuestions: number;
   correctAnswers: number;
   gamesPlayed: number;
@@ -23,10 +23,9 @@ interface GameContextType {
   currentLesson: number;
   completedLessons: LessonProgress[];
   stats: GameStats;
-  updateLessonProgress: (lessonId: number, stars: number) => void;
-  updateStats: (update: Partial<GameStats>) => void;
-  incrementStat: (key: keyof GameStats, amount?: number) => void;
-  refreshStats: () => void;
+  applyStats: (backend: any) => void;
+  refreshStats: () => Promise<void>;
+  refreshProgress: () => Promise<void>;
 }
 
 const defaultStats: GameStats = {
@@ -41,14 +40,14 @@ const defaultStats: GameStats = {
 };
 
 const mapStats = (backend: any): GameStats => ({
-  totalQuestions: backend.total_questions ?? 0,
-  correctAnswers: backend.correct_answers ?? 0,
-  gamesPlayed: backend.games_played ?? 0,
-  lessonsCompleted: backend.lessons_completed ?? 0,
-  challengeBestStreak: backend.challenge_best_streak ?? 0,
-  apocalypseBestStreak: backend.apocalypse_best_streak ?? 0,
-  challengeHighScore: backend.challenge_high_score ?? 0,
-  apocalypseHighScore: backend.apocalypse_high_score ?? 0,
+  totalQuestions: backend?.total_questions ?? 0,
+  correctAnswers: backend?.correct_answers ?? 0,
+  gamesPlayed: backend?.games_played ?? 0,
+  lessonsCompleted: backend?.lessons_completed ?? 0,
+  challengeBestStreak: backend?.challenge_best_streak ?? 0,
+  apocalypseBestStreak: backend?.apocalypse_best_streak ?? 0,
+  challengeHighScore: backend?.challenge_high_score ?? 0,
+  apocalypseHighScore: backend?.apocalypse_high_score ?? 0,
 });
 
 const GameContext = createContext<GameContextType | undefined>(undefined);
@@ -59,109 +58,68 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [completedLessons, setCompletedLessons] = useState<LessonProgress[]>([]);
   const [stats, setStats] = useState<GameStats>(defaultStats);
 
-  useEffect(() => {
-  if (!user) return;
+  const applyStats = useCallback((backend: any) => {
+    setStats(mapStats(backend));
+  }, []);
 
-  Promise.all([
-    api.get("/stats"),
-    api.get("/lessons/progress"),
-  ]).then(([statsRes, lessonsRes]) => {
-    setStats(mapStats(statsRes.data));
-
-    const lessons = lessonsRes.data.map((l: any) => ({
-      lessonId: l.lesson_id,
-      stars: l.stars,
-      completed: l.completed,
-    }));
-
-    setCompletedLessons(lessons);
-
-    const highestCompleted = lessons
-      .filter(l => l.completed)
-      .map(l => l.lessonId)
-      .sort((a, b) => b - a)[0] ?? 0;
-
-    setCurrentLesson(highestCompleted + 1);
-  });
-}, [user]);
-
-  // Save stats to backend when they change
-  const hasLoadedInitialStats = useRef(false);
-  const statsRef = useRef(stats);
-  statsRef.current = stats;
-
-  useEffect(() => {
+  const refreshStats = useCallback(async () => {
     if (!user) return;
-    
-    if (!hasLoadedInitialStats.current) {
-      hasLoadedInitialStats.current = true;
+    try {
+      const res = await api.get("/stats");
+      setStats(mapStats(res.data));
+    } catch (err) {
+      console.error("Failed to refresh stats from backend:", err);
+    }
+  }, [user?.id]);
+
+  const refreshProgress = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await api.get("/lessons/progress");
+      const lessons: LessonProgress[] = res.data.map((l: any) => ({
+        lessonId: l.lesson_id,
+        stars: l.stars,
+        completed: Boolean(l.completed),
+      }));
+      setCompletedLessons(lessons);
+
+      const highestCompleted =
+        lessons
+          .filter((l) => l.completed)
+          .map((l) => l.lessonId)
+          .sort((a, b) => b - a)[0] ?? 0;
+      setCurrentLesson(highestCompleted + 1);
+    } catch (err) {
+      console.error("Failed to refresh lesson progress from backend:", err);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user) {
+      setStats(defaultStats);
+      setCompletedLessons([]);
+      setCurrentLesson(1);
       return;
     }
 
-    const currentStats = statsRef.current;
-    api.put("/stats", {
-      total_questions: currentStats.totalQuestions,
-      correct_answers: currentStats.correctAnswers,
-      games_played: currentStats.gamesPlayed,
-      lessons_completed: currentStats.lessonsCompleted,
-      challenge_best_streak: currentStats.challengeBestStreak,
-      apocalypse_best_streak: currentStats.apocalypseBestStreak,
-      challenge_high_score: currentStats.challengeHighScore,
-      apocalypse_high_score: currentStats.apocalypseHighScore,
-    }).catch((err) => {
-      console.error("Failed to save stats to backend:", err);
-    });
-  }, [stats]);
+    refreshStats();
+    refreshProgress();
 
-  const updateLessonProgress = async (lessonId: number, stars: number) => {
-    await api.post("/lessons/progress", {
-      lesson_id: lessonId,
-      stars,
-    });
-
-    setCompletedLessons((prev) => {
-      const existing = prev.find(l => l.lessonId === lessonId);
-      if (existing) {
-        return prev.map(l =>
-          l.lessonId === lessonId
-            ? { ...l, stars: Math.max(l.stars, stars), completed: true }
-            : l
-        );
+    const syncOnVisible = () => {
+      if (document.visibilityState === "visible") {
+        refreshStats();
+        refreshProgress();
       }
-      return [...prev, { lessonId, stars, completed: true }];
-    });
+    };
 
-    setCurrentLesson((prev) => Math.max(prev, lessonId + 1));
-  };
+    window.addEventListener("focus", syncOnVisible);
+    document.addEventListener("visibilitychange", syncOnVisible);
 
-
-  const updateStats = (update: Partial<GameStats>) => {
-    setStats((prev) => ({ ...prev, ...update }));
-  };
-
-  const incrementStat = (key: keyof GameStats, amount = 1) => {
-    setStats((prev) => ({ ...prev, [key]: prev[key] + amount }));
-  };
-
-  const refreshStats = () => {
-    if (user) {
-      api.get("/stats").then((res) => {
-        const backendStats = res.data;
-        setStats({
-          totalQuestions: backendStats.total_questions || 0,
-          correctAnswers: backendStats.correct_answers || 0,
-          gamesPlayed: backendStats.games_played || 0,
-          lessonsCompleted: backendStats.lessons_completed || 0,
-          challengeBestStreak: backendStats.challenge_best_streak || 0,
-          apocalypseBestStreak: backendStats.apocalypse_best_streak || 0,
-          challengeHighScore: backendStats.challenge_high_score || 0,
-          apocalypseHighScore: backendStats.apocalypse_high_score || 0,
-        });
-      }).catch((err) => {
-        console.error("Failed to refresh stats from backend:", err);
-      });
-    }
-  };
+    return () => {
+      window.removeEventListener("focus", syncOnVisible);
+      document.removeEventListener("visibilitychange", syncOnVisible);
+    };
+  }, [user?.id, refreshStats, refreshProgress]);
 
   return (
     <GameContext.Provider
@@ -169,10 +127,9 @@ export function GameProvider({ children }: { children: ReactNode }) {
         currentLesson,
         completedLessons,
         stats,
-        updateLessonProgress,
-        updateStats,
-        incrementStat,
+        applyStats,
         refreshStats,
+        refreshProgress,
       }}
     >
       {children}

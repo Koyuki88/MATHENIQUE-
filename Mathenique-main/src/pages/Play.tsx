@@ -1,55 +1,53 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Navigation } from "@/components/layout/Navigation";
 import { GameModeCard } from "@/components/game/GameModeCard";
-import { QuestionCard, Question } from "@/components/game/QuestionCard";
+import { AnswerEvaluation, Question, QuestionCard } from "@/components/game/QuestionCard";
 import { LivesIndicator } from "@/components/game/LivesIndicator";
 import { ProgressBar } from "@/components/game/ProgressBar";
 import { Timer } from "@/components/game/Timer";
-import { lessonMeta } from "@/data/lessons"
+import { lessonMeta } from "@/data/lessons";
 import { GameButton } from "@/components/ui/GameButton";
 import { useGame } from "@/contexts/GameContext";
 import api from "@/api/axios";
 import { Zap, Skull, Shuffle, Trophy, ArrowLeft, HeartCrack, Target, Lock } from "lucide-react";
 import { toast } from "sonner";
+import { soundEngine } from "@/lib/sound";
 
 type GameMode = "normal" | "mixed" | "challenge" | "apocalypse";
 type GameState = "menu" | "playing" | "won" | "lost" | "ended";
 
-const QUESTIONS_PER_GAME = 10;
-const QUESTIONS_PER_APO = 30;
 const CHALLENGE_TIME = 10; // seconds per question
 const APOCALYPSE_TIME = 60; // seconds per game
 
-async function fetchQuestions(
-  mode: string,
-  count: number,
-  subject?: string
-): Promise<Question[]> {
-  const res = await api.get("/questions", {
-    params: { mode, count, subject },
-  });
-
-  return res.data.map((q: any): Question => ({
-    id: q.id,
-    question: q.text,
-    options: q.options,
-    correctAnswer: q.correct_index
-  }));
+interface PlayAnswerOutcome {
+  is_correct: boolean;
+  correct_index: number;
+  points_earned: number;
+  score: number;
+  streak: number;
+  best_streak: number;
+  lives: number;
+  status: string;
 }
 
-
 export default function Play() {
-  const streakRef = useRef(0);
   const bestStreakRef = useRef(0);
   const scoreRef = useRef(0);
+  const sessionIdRef = useRef<string | null>(null);
+  const gameModeRef = useRef<GameMode | null>(null);
+  const questionsLengthRef = useRef(0);
+  const isFinishingRef = useRef(false);
+  const pendingOutcomeRef = useRef<PlayAnswerOutcome | null>(null);
+
   const navigate = useNavigate();
-  const { incrementStat, updateStats, stats, completedLessons } = useGame();
-  
-  const [gameMode, setGameMode] = useState<GameMode>(null);
+  const { applyStats, stats, completedLessons, refreshStats, refreshProgress } = useGame();
+
+  const [gameMode, setGameMode] = useState<GameMode | null>(null);
   const [gameState, setGameState] = useState<GameState>("menu");
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [showTopics, setShowTopics] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [lives, setLives] = useState(3);
@@ -57,48 +55,77 @@ export default function Play() {
   const [streak, setStreak] = useState(0);
   const [timerKey, setTimerKey] = useState(0);
   const [isTimerRunning, setIsTimerRunning] = useState(true);
-  
-  useEffect(() => {
-    streakRef.current = streak;
-  }, [streak]);
 
   useEffect(() => {
-    scoreRef.current = score;
-  }, [score]);
+    gameModeRef.current = gameMode;
+  }, [gameMode]);
 
+  useEffect(() => {
+    if (gameState !== "menu") return;
+    refreshStats();
+    refreshProgress();
+  }, [gameState, refreshStats, refreshProgress]);
 
-  const topics = Array.from(new Set(lessonMeta.map(l => l.topic)));
-  const unlockedTopics = Array.from(new Set(
-    completedLessons.map(progress => {
-      const lesson = lessonMeta.find(l => l.id === progress.lessonId);
-      return lesson?.topic;
-    }).filter(Boolean) as string[]
-  ));
+  const unlockedTopics = Array.from(
+    new Set(
+      completedLessons
+        .map((progress) => {
+          const lesson = lessonMeta.find((l) => l.id === progress.lessonId);
+          return lesson?.topic;
+        })
+        .filter(Boolean) as string[]
+    )
+  );
   const allLessonsCompleted = completedLessons.length === lessonMeta.length;
 
   const currentQuestion = questions[currentQuestionIndex];
+
+  const initializeSession = (
+    newSessionId: string,
+    mode: GameMode,
+    rawQuestions: any[]
+  ) => {
+    const mapped: Question[] = rawQuestions.map((q) => ({
+      id: q.id,
+      question: q.text,
+      options: q.options,
+    }));
+
+    sessionIdRef.current = newSessionId;
+    gameModeRef.current = mode;
+    questionsLengthRef.current = mapped.length;
+    isFinishingRef.current = false;
+    pendingOutcomeRef.current = null;
+    bestStreakRef.current = 0;
+    scoreRef.current = 0;
+
+    setSessionId(newSessionId);
+    setGameMode(mode);
+    setQuestions(mapped);
+    setCurrentQuestionIndex(0);
+    setLives(3);
+    setScore(0);
+    setStreak(0);
+    setTimerKey((prev) => prev + 1);
+    setIsTimerRunning(true);
+    setGameState("playing");
+    soundEngine.playStart();
+  };
 
   const startNormalGame = async (topic: string) => {
     setSelectedTopic(topic);
     setShowTopics(false);
 
-    const gameQuestions = await fetchQuestions(
-      "normal",
-      QUESTIONS_PER_GAME,
-      topic
-    )
-
-    setQuestions(gameQuestions);
-    setCurrentQuestionIndex(0);
-    setLives(3);
-    setScore(0);
-    setStreak(0);
-    streakRef.current = 0;
-    scoreRef.current = 0;
-    bestStreakRef.current = 0
-    setTimerKey((prev) => prev + 1);
-    setGameState("playing");
-    incrementStat("gamesPlayed");
+    try {
+      const res = await api.post("/game/start", {
+        mode: "normal",
+        subject: topic,
+      });
+      initializeSession(res.data.session_id, "normal", res.data.questions);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Failed to start game");
+    }
   };
 
   const selectGameMode = async (mode: GameMode) => {
@@ -110,151 +137,159 @@ export default function Play() {
       return;
     }
 
-    let count = mode === "apocalypse" ? QUESTIONS_PER_APO : QUESTIONS_PER_GAME;
-
-    const gameQuestions = await fetchQuestions(mode, count);
-    
-    setQuestions(gameQuestions);
-    setCurrentQuestionIndex(0);
-    setLives(3);
-    setScore(0);
-    setStreak(0);
-    streakRef.current = 0;
-    scoreRef.current = 0;
-    bestStreakRef.current = 0;
-    setTimerKey(prev => prev + 1);
-    setIsTimerRunning(true);
-    setGameState("playing");
-    incrementStat("gamesPlayed");
+    setSelectedTopic(null);
+    try {
+      const res = await api.post("/game/start", { mode });
+      initializeSession(res.data.session_id, mode, res.data.questions);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Failed to start game");
+    }
   };
 
-  const handleTimeUp = useCallback(() => {
-    toast.error("Time's up!");
+  const endGame = useCallback(
+    async (reason: "win" | "lose" | "timeout") => {
+      if (!sessionIdRef.current || isFinishingRef.current) return;
+      isFinishingRef.current = true;
+      setIsTimerRunning(false);
 
-    if (gameMode === "apocalypse") {
-      endGame("timeout");
+      try {
+        const res = await api.post(`/game/${sessionIdRef.current}/finish`);
+        applyStats(res.data.stats);
+      } catch (error) {
+        console.error("Failed to finalize game:", error);
+      }
+
+      if (reason === "win") {
+        soundEngine.playVictory();
+      } else if (reason === "lose") {
+        soundEngine.playDefeat();
+      } else if (scoreRef.current > 0) {
+        soundEngine.playVictory();
+      } else {
+        soundEngine.playTimeout();
+      }
+
+      setGameState(reason === "win" ? "won" : reason === "lose" ? "lost" : "ended");
+    },
+    [applyStats]
+  );
+
+  const nextQuestion = useCallback(() => {
+    const mode = gameModeRef.current;
+    if (mode === "apocalypse") {
+      const len = questionsLengthRef.current;
+      setCurrentQuestionIndex((prev) => (len > 0 ? (prev + 1) % len : 0));
       return;
     }
 
-    const newLives = lives - 1;
-    setLives(newLives);
-    setStreak(0);
-    streakRef.current = 0;
+    setCurrentQuestionIndex((prev) => prev + 1);
 
-    if (newLives === 0) {
-      endGame("lose");
-    } else {
-      nextQuestion();
-    }
-  }, [lives, gameMode]);
-
-
-  const nextQuestion = () => {
-    if (gameMode === "apocalypse") {
-      setCurrentQuestionIndex((prev) => (prev + 1) % questions.length);
-      return;
-    }
-
-    if (currentQuestionIndex === questions.length - 1) {
-      endGame("win");
-    } else {
-      setCurrentQuestionIndex((prev) => prev + 1);
-    }
-
-    if (gameMode === "challenge") {
+    if (mode === "challenge") {
       setTimerKey((prev) => prev + 1);
       setIsTimerRunning(true);
     }
-  };
+  }, []);
 
+  const handleTimeUp = useCallback(async () => {
+    if (!sessionIdRef.current || isFinishingRef.current) return;
 
-  const handleAnswer = (isCorrect: boolean) => {
-    incrementStat("totalQuestions");
+    toast.error("Time's up!");
+    setIsTimerRunning(false);
 
-    if (isCorrect) {
-      incrementStat("correctAnswers");
-
-      const points = gameMode === "normal" ? 10 : 20;
-      setScore((s) => {
-        const next = s + points;
-        scoreRef.current = next;
-        return next;
-      });
-
-      setStreak((s) => {
-        const next = s + 1;
-        bestStreakRef.current = Math.max(bestStreakRef.current, next);
-        return next;
-      });
-
-      toast.success(`+${points}`);
-    } else {
-      const newLives = lives - 1;
-      setLives(newLives);
+    try {
+      const res = await api.post(`/game/${sessionIdRef.current}/timeout`);
+      setLives(res.data.lives);
       setStreak(0);
-      streakRef.current = 0;
 
-      if (newLives === 0) {
-        endGame("lose");
-        return;
+      if (res.data.status === "ended") {
+        await endGame("timeout");
+      } else if (res.data.status === "lost") {
+        await endGame("lose");
+      } else if (res.data.status === "won") {
+        soundEngine.playTimeout();
+        await endGame("win");
+      } else {
+        soundEngine.playTimeout();
+        nextQuestion();
       }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Failed to process timeout");
+    }
+  }, [endGame, nextQuestion]);
+
+  const handleSubmitAnswer = async (selectedIndex: number): Promise<AnswerEvaluation> => {
+    if (!sessionIdRef.current || !currentQuestion) {
+      throw new Error("No active game session");
     }
 
-    if (gameMode === "challenge") {
+    if (gameModeRef.current === "challenge") {
       setIsTimerRunning(false);
+    }
+
+    try {
+      const res = await api.post(`/game/${sessionIdRef.current}/answer`, {
+        question_id: currentQuestion.id,
+        selected_index: selectedIndex,
+      });
+
+      pendingOutcomeRef.current = res.data;
+      scoreRef.current = res.data.score;
+      return {
+        isCorrect: res.data.is_correct,
+        correctAnswer: res.data.correct_index,
+        streak: res.data.streak,
+      };
+    } catch (err: any) {
+      if (gameModeRef.current === "challenge" && !isFinishingRef.current) {
+        setIsTimerRunning(true);
+      }
+      const detail = err?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Failed to submit answer");
+      throw err;
+    }
+  };
+
+  const handleResultComplete = async () => {
+    const outcome = pendingOutcomeRef.current;
+    pendingOutcomeRef.current = null;
+    if (!outcome) return;
+
+    setScore(outcome.score);
+    setStreak(outcome.streak);
+    bestStreakRef.current = outcome.best_streak;
+    setLives(outcome.lives);
+
+    if (outcome.is_correct) {
+      toast.success(`+${outcome.points_earned}`);
+    }
+
+    if (outcome.status === "lost") {
+      await endGame("lose");
+      return;
+    }
+
+    if (outcome.status === "won") {
+      await endGame("win");
+      return;
     }
 
     nextQuestion();
   };
 
   const exitGame = () => {
+    sessionIdRef.current = null;
+    gameModeRef.current = null;
+    isFinishingRef.current = false;
+    pendingOutcomeRef.current = null;
+    setIsTimerRunning(false);
+    setSessionId(null);
     setGameMode(null);
     setSelectedTopic(null);
     setShowTopics(false);
     setGameState("menu");
   };
-
-  const endGame = async (reason: "win" | "lose" | "timeout") => {
-    if (gameMode === "challenge") {
-      updateStats({
-        challengeHighScore: Math.max(stats.challengeHighScore, scoreRef.current),
-        challengeBestStreak: Math.max(stats.challengeBestStreak, bestStreakRef.current),
-      });
-    }
-
-    if (gameMode === "apocalypse") {
-      updateStats({
-        apocalypseHighScore: Math.max(stats.apocalypseHighScore, scoreRef.current),
-        apocalypseBestStreak: Math.max(stats.apocalypseBestStreak, bestStreakRef.current),
-      });
-    }
-
-    // Update Leaderboard
-    try {
-      if (scoreRef.current > 0) {
-        // Calculate rough accuracy based on final score
-        // Normal question = 10 pts.
-        const estimatedCorrect = Math.ceil(scoreRef.current / 10);
-        const accuracy = (estimatedCorrect / questions.length) * 100;
-        
-        await api.post("/leaderboard/add-score", null, {
-          params: {
-            points: scoreRef.current,
-            streak: bestStreakRef.current,
-            is_correct: true,
-            games_played: 1,
-            games_won: reason === "win" ? 1 : 0,
-            accuracy: Math.min(accuracy, 100)
-          }
-        });
-      }
-    } catch (error) {
-      console.error("Failed to update leaderboard:", error);
-    }
-
-    setGameState(reason === "win" ? "won" : (reason === "lose" ? "lost" : "ended"));
-  };
-
 
   // Playing state
   if (gameState === "playing") {
@@ -263,7 +298,9 @@ export default function Play() {
         <div className="min-h-screen flex items-center justify-center p-4">
           <div className="text-center">
             <h2 className="text-2xl font-fredoka font-bold mb-4">No Questions Available</h2>
-            <p className="text-muted-foreground mb-6">Sorry, there are no questions for this topic/mode right now.</p>
+            <p className="text-muted-foreground mb-6">
+              Sorry, there are no questions for this topic/mode right now.
+            </p>
             <GameButton variant="primary" onClick={exitGame}>
               Back to Menu
             </GameButton>
@@ -310,7 +347,7 @@ export default function Play() {
             <Timer
               key={timerKey}
               seconds={APOCALYPSE_TIME}
-              isRunning={gameState === "playing"}
+              isRunning={gameState === "playing" && isTimerRunning}
               onTimeUp={handleTimeUp}
               className="mb-4"
             />
@@ -321,13 +358,14 @@ export default function Play() {
             <div className="flex justify-between text-sm font-semibold mb-2">
               <span className="capitalize">{gameMode} Mode</span>
               <span>
-                Question {currentQuestionIndex + 1} of {gameMode === "apocalypse" ? "?": questions.length}
+                Question {currentQuestionIndex + 1} of{" "}
+                {gameMode === "apocalypse" ? "?" : questions.length}
               </span>
             </div>
-            <ProgressBar 
-              value={gameMode === "apocalypse" ? 100 : progress} 
-              variant={"primary"} 
-              size="lg" 
+            <ProgressBar
+              value={gameMode === "apocalypse" ? 100 : progress}
+              variant={"primary"}
+              size="lg"
             />
           </div>
 
@@ -341,10 +379,12 @@ export default function Play() {
           )}
 
           {/* Question */}
-          <QuestionCard 
-            question={currentQuestion} 
-            onAnswer={handleAnswer}
-            disabled={gameState !== "playing"} 
+          <QuestionCard
+            key={`${sessionId}-${currentQuestionIndex}`}
+            question={currentQuestion}
+            onSubmitAnswer={handleSubmitAnswer}
+            onResultComplete={handleResultComplete}
+            disabled={gameState !== "playing"}
           />
         </div>
         <Navigation />
@@ -361,10 +401,10 @@ export default function Play() {
             <Trophy className="w-10 h-10 text-foreground" />
           </div>
           <h2 className="text-3xl font-fredoka font-bold mb-2">Great Job!</h2>
-          
+
           <div className="text-5xl font-fredoka font-bold text-primary mb-2">{score}</div>
           <p className="text-muted-foreground mb-6">points earned</p>
-          
+
           <div className="grid grid-cols-2 gap-4 mb-8">
             <div className="p-4 rounded-xl bg-muted">
               <div className="text-2xl font-bold">
@@ -373,19 +413,25 @@ export default function Play() {
                 {gameMode === "mixed" && bestStreakRef.current}
               </div>
               <div className="text-sm text-muted-foreground">Best Streak</div>
-              {gameMode === "challenge" && <div className="text-sm text-muted-foreground">of All Time!</div>}
+              {gameMode === "challenge" && (
+                <div className="text-sm text-muted-foreground">of All Time!</div>
+              )}
             </div>
             <div className="p-4 rounded-xl bg-muted">
               <div className="text-2xl font-bold">{lives}/3</div>
               <div className="text-sm text-muted-foreground">Lives Left</div>
             </div>
           </div>
-          
+
           <div className="flex flex-col gap-3">
-            <GameButton 
-              variant="primary" 
-              size="lg" 
-              onClick={() => gameMode === "normal" && selectedTopic ? startNormalGame(selectedTopic) : selectGameMode(gameMode)}
+            <GameButton
+              variant="primary"
+              size="lg"
+              onClick={() =>
+                gameMode === "normal" && selectedTopic
+                  ? startNormalGame(selectedTopic)
+                  : gameMode && selectGameMode(gameMode)
+              }
             >
               Play Again
             </GameButton>
@@ -407,10 +453,10 @@ export default function Play() {
             <Trophy className="w-10 h-10 text-foreground" />
           </div>
           <h2 className="text-3xl font-fredoka font-bold mb-2">Apocalypse Over!</h2>
-          
+
           <div className="text-5xl font-fredoka font-bold text-primary mb-2">{score}</div>
           <p className="text-muted-foreground mb-6">points earned</p>
-          
+
           <div className="grid grid-cols-2 gap-4 mb-8">
             <div className="p-4 rounded-xl bg-muted">
               <div className="text-2xl font-bold">{stats.apocalypseBestStreak}</div>
@@ -422,12 +468,12 @@ export default function Play() {
               <div className="text-sm text-muted-foreground">Lives Left</div>
             </div>
           </div>
-          
+
           <div className="flex flex-col gap-3">
-            <GameButton 
-              variant="primary" 
-              size="lg" 
-              onClick={() => selectedTopic ? startNormalGame(selectedTopic) : selectGameMode(gameMode)}
+            <GameButton
+              variant="primary"
+              size="lg"
+              onClick={() => gameMode && selectGameMode(gameMode)}
             >
               Play Again
             </GameButton>
@@ -442,11 +488,6 @@ export default function Play() {
 
   // Lost state
   if (gameState === "lost") {
-    // Update challenge high score if applicable
-    if (gameMode === "challenge" && score > stats.challengeHighScore) {
-      updateStats({ challengeHighScore: score });
-    }
-    
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         <div className="game-card p-8 max-w-md text-center shake">
@@ -454,15 +495,19 @@ export default function Play() {
             <HeartCrack className="w-10 h-10 text-primary" />
           </div>
           <h2 className="text-3xl font-fredoka font-bold mb-2">A Battle is Never Over...</h2>
-          
+
           <div className="text-4xl font-fredoka font-bold text-primary mb-2">{score}</div>
           <p className="text-muted-foreground mb-8">points earned</p>
-          
+
           <div className="flex flex-col gap-3">
-            <GameButton 
-              variant="primary" 
-              size="lg" 
-              onClick={() => gameMode === "normal" && selectedTopic ? startNormalGame(selectedTopic) : selectGameMode(gameMode)}
+            <GameButton
+              variant="primary"
+              size="lg"
+              onClick={() =>
+                gameMode === "normal" && selectedTopic
+                  ? startNormalGame(selectedTopic)
+                  : gameMode && selectGameMode(gameMode)
+              }
             >
               Try Again
             </GameButton>
@@ -480,7 +525,7 @@ export default function Play() {
     return (
       <div className="min-h-screen pb-24 md:pt-24">
         <Navigation />
-        
+
         <div className="container mx-auto px-4 py-8">
           <div className="text-center mb-12">
             <h1 className="text-3xl md:text-4xl font-fredoka font-bold mb-2">Arena</h1>
@@ -493,7 +538,8 @@ export default function Play() {
             </div>
             <h2 className="text-2xl font-fredoka font-bold mb-4">Arena Locked</h2>
             <p className="text-muted-foreground mb-6">
-              Complete at least one journey to unlock the Play Arena and start testing your skills, soldier!
+              Complete at least one journey to unlock the Play Arena and start testing your skills,
+              soldier!
             </p>
             <GameButton variant="primary" onClick={() => navigate("/lessons")}>
               Go to Lessons
@@ -508,7 +554,7 @@ export default function Play() {
   return (
     <div className="min-h-screen pb-24 md:pt-24">
       <Navigation />
-      
+
       <div className="container mx-auto px-4 py-8">
         <div className="text-center mb-12">
           <h1 className="text-3xl md:text-4xl font-fredoka font-bold mb-2">Play Arena</h1>
@@ -525,7 +571,7 @@ export default function Play() {
               onClick={() => selectGameMode("normal")}
             />
           )}
-          
+
           {showTopics && unlockedTopics.length > 0 && (
             <div className="flex gap-4 justify-center animate-in slide-in-from-top-2 duration-300">
               {unlockedTopics.map((topic) => (
@@ -541,7 +587,7 @@ export default function Play() {
               ))}
             </div>
           )}
-          
+
           {allLessonsCompleted && (
             <GameModeCard
               title="Mayhem"
@@ -551,7 +597,7 @@ export default function Play() {
               onClick={() => selectGameMode("mixed")}
             />
           )}
-          
+
           {allLessonsCompleted && (
             <div className="relative">
               {/* High Score Badge */}

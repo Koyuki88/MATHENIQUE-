@@ -30,6 +30,11 @@ __pycache__/
 .venv/
 venv/
 
+# Environment files (keep .env.example)
+.env
+.env.*
+!.env.example
+
 # Database
 *.db
 *.sqlite3

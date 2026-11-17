@@ -1,52 +1,132 @@
-from pydantic import BaseModel
+import re
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _normalize_email(value: str) -> str:
+    cleaned = value.strip().lower()
+    if len(cleaned) > 254 or not _EMAIL_RE.match(cleaned):
+        raise ValueError("Invalid email address")
+    return cleaned
+
 
 class UserCreate(BaseModel):
-    name: str
-    email: str
-    password: str
+    name: str = Field(min_length=1, max_length=64)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Name cannot be empty")
+        if any(ord(ch) < 32 for ch in cleaned):
+            raise ValueError("Name contains invalid control characters")
+        return cleaned
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Password cannot be whitespace only")
+        return v
+
 
 class UserLogin(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
 
 class Token(BaseModel):
     access_token: str
     token_type: str
 
-class StatsUpdate(BaseModel):
-    total_questions: int = 0
-    correct_answers: int = 0
-    games_played: int = 0
-    lessons_completed: int = 0
-    challenge_best_streak: int = 0
-    apocalypse_best_streak: int = 0
-    challenge_high_score: int = 0
-    apocalypse_high_score: int = 0
 
 class QuestionOut(BaseModel):
     id: int
     text: str
     options: list[str]
-    correct_index: int
     subject: str | None
     difficulty: int
     is_lesson: int
     is_game: int
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
-class LessonProgressCreate(BaseModel):
-    lesson_id: int
-    stars: int
+
+class GameStartRequest(BaseModel):
+    mode: Literal["lesson", "normal", "mixed", "challenge", "apocalypse"]
+    subject: Literal["algebra", "geometry", "trigonometry"] | None = None
+    lesson_id: int | None = Field(default=None, ge=1, le=6)
+
+
+class GameStartResponse(BaseModel):
+    session_id: str
+    mode: str
+    questions: list[QuestionOut]
+
+
+class AnswerSubmitRequest(BaseModel):
+    question_id: int = Field(ge=1)
+    selected_index: int = Field(ge=0, le=3)
+
+
+class AnswerSubmitResponse(BaseModel):
+    is_correct: bool
+    correct_index: int
+    points_earned: int
+    score: int
+    streak: int
+    best_streak: int
+    lives: int
+    status: str
+
+
+class GameTimeoutResponse(BaseModel):
+    lives: int
+    score: int
+    best_streak: int
+    status: str
+
+
+class StatsOut(BaseModel):
+    total_questions: int
+    correct_answers: int
+    games_played: int
+    challenge_best_streak: int
+    apocalypse_best_streak: int
+    lessons_completed: int
+    challenge_high_score: int
+    apocalypse_high_score: int
+
+
+class GameFinishResponse(BaseModel):
+    status: str
+    score: int
+    best_streak: int
+    stars: int | None = None
+    stats: StatsOut
+
 
 class LessonProgressOut(BaseModel):
     lesson_id: int
     stars: int
     completed: int
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LeaderboardEntry(BaseModel):
@@ -59,8 +139,7 @@ class LeaderboardEntry(BaseModel):
     highest_streak: int
     last_updated: str
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LeaderboardResponse(BaseModel):

@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { GameProvider } from "@/contexts/GameContext";
+import { SoundProvider } from "@/contexts/SoundContext";
 
 // Main App Component
 import Index from "./pages/Index";
@@ -89,15 +90,17 @@ function AppRoutes() {
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
-      <AuthProvider>
-        <GameProvider>
-          <Toaster />
-          <Sonner />
-          <BrowserRouter>
-            <AppRoutes />
-          </BrowserRouter>
-        </GameProvider>
-      </AuthProvider>
+      <SoundProvider>
+        <AuthProvider>
+          <GameProvider>
+            <Toaster />
+            <Sonner />
+            <BrowserRouter>
+              <AppRoutes />
+            </BrowserRouter>
+          </GameProvider>
+        </AuthProvider>
+      </SoundProvider>
     </TooltipProvider>
   </QueryClientProvider>
 );

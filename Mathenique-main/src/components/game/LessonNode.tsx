@@ -1,5 +1,6 @@
 import { Lock, Star, Check, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { soundEngine } from "@/lib/sound";
 
 export interface LessonNodeProps {
   id: number;
@@ -21,9 +22,15 @@ export function LessonNode({
   stars = 0,
   onClick,
 }: LessonNodeProps) {
+  const handleClick = () => {
+    if (isLocked) return;
+    soundEngine.playClick();
+    onClick?.();
+  };
+
   return (
     <button
-      onClick={onClick}
+      onClick={handleClick}
       disabled={isLocked}
       className={cn(
         "relative flex flex-col items-center transition-all duration-300",

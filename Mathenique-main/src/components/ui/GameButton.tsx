@@ -1,6 +1,7 @@
 import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
+import { soundEngine } from "@/lib/sound";
 
 const gameButtonVariants = cva(
   "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl font-fredoka font-semibold tracking-wide transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
@@ -41,14 +42,25 @@ const gameButtonVariants = cva(
 
 export interface GameButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof gameButtonVariants> {}
+    VariantProps<typeof gameButtonVariants> {
+  sound?: "click" | "none";
+}
 
 const GameButton = React.forwardRef<HTMLButtonElement, GameButtonProps>(
-  ({ className, variant, size, ...props }, ref) => {
+  ({ className, variant, size, sound = "click", onClick, disabled, ...props }, ref) => {
+    const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+      if (!disabled && sound !== "none") {
+        soundEngine.playClick();
+      }
+      onClick?.(e);
+    };
+
     return (
       <button
         className={cn(gameButtonVariants({ variant, size, className }))}
         ref={ref}
+        disabled={disabled}
+        onClick={handleClick}
         {...props}
       />
     );

@@ -26,18 +26,23 @@ import {
 
 export default function Progress() {
   const { user } = useAuth();
-  const { stats, completedLessons, currentLesson, refreshStats } = useGame();
+  const { stats, completedLessons, currentLesson, refreshStats, refreshProgress } = useGame();
 
-  // Refresh stats when page loads to ensure latest data
+  // Keep stats and lesson progress synced in real time while viewing Progress
   useEffect(() => {
-    if (user) {
-      // Small delay to allow any pending saves to complete
-      const timeoutId = setTimeout(() => {
+    if (!user) return;
+
+    const sync = () => {
+      if (document.visibilityState === "visible") {
         refreshStats();
-      }, 1000);
-      return () => clearTimeout(timeoutId);
-    }
-  }, [user, refreshStats]);
+        refreshProgress();
+      }
+    };
+
+    sync();
+    const intervalId = window.setInterval(sync, 4000);
+    return () => window.clearInterval(intervalId);
+  }, [user, refreshStats, refreshProgress]);
 
   const accuracy = stats.totalQuestions > 0 
     ? Math.round((stats.correctAnswers / stats.totalQuestions) * 100) 
