@@ -315,6 +315,8 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
 
     try:
         db.add(new_user)
+        db.flush()
+        initialize_leaderboard_entry(new_user.id, db)
         db.commit()
         db.refresh(new_user)
     except IntegrityError:

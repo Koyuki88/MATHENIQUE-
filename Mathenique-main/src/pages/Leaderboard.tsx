@@ -45,10 +45,10 @@ export default function Leaderboard() {
         }
         setError(null);
 
-        const [globalRes, topRes, rankRes] = await Promise.all([
+        const rankRes = await api.get("/leaderboard/my-rank").catch(() => ({ data: null }));
+        const [globalRes, topRes] = await Promise.all([
           api.get(`/leaderboard/global?skip=${page * itemsPerPage}&limit=${itemsPerPage}`),
           api.get("/leaderboard/top-10"),
-          api.get("/leaderboard/my-rank").catch(() => ({ data: null })),
         ]);
 
         setGlobalLeaderboard(globalRes.data);
