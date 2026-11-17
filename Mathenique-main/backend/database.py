@@ -19,8 +19,10 @@ if not DATABASE_URL:
         )
     DATABASE_URL = "sqlite:///./mathenique.db"
 elif DATABASE_URL.startswith("postgres://"):
-    # SQLAlchemy 2.x requires postgresql:// rather than legacy postgres://
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    # SQLAlchemy 2.1+ defaults bare postgresql:// to psycopg3; explicitly use installed psycopg2-binary
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 # SQLite needs specific connect_args, PostgreSQL does not
 connect_args = (
